@@ -1,9 +1,13 @@
+from math import ceil
+
 import numpy as np
 import scipy
 from . import scanning
 
 
-def bwdct(a: np.ndarray, block_size=8, qt=None, is_zzsqt=False, with_pad=True) -> np.ndarray:
+def bwdct(
+        img: np.ndarray, block_size=8,
+        qt=None, is_zzsqt=False, trunc_only=False) -> np.ndarray:
     """JPEGで利用されるブロックごとのDCTを行います。
 
     Args:
@@ -14,21 +18,27 @@ def bwdct(a: np.ndarray, block_size=8, qt=None, is_zzsqt=False, with_pad=True) -
         ブロックごとのDCT係数
 
     Todo:
-         * 並列計算に対応する。(skimage.restoration.cycle_spinとか?)
+         * skimage.restoration.cycle_spinの調査
     """
     if qt is not None and is_zzsqt:
         qt = scanning.zigzag(qt, block_size=block_size, inverse=True)
-    if with_pad:
-        h_pad = block_size - a.shape[0] % block_size
-        w_pad = block_size - a.shape[1] % block_size
-        a = np.pad(a, [[0, h_pad], [0, w_pad]])
-    h = a.shape[0] // block_size
-    w = a.shape[1] // block_size
-    ret = np.zeros((h, w, block_size ** 2), dtype=np.int32)
-    for i in range(h):
-        for j in range(w):
+    output_size = (
+        ceil(img.shape[0] / block_size),
+        ceil(img.shape[1] / block_size),
+        block_size ** 2
+    )
+    img = np.pad(
+        img,
+        [
+            [0, output_size[0] * block_size - img.shape[0]],
+            [0, output_size[0] * block_size - img.shape[1]]
+        ])
+    coef = np.zeros(output_size, dtype=np.float64)
+    for i in range(output_size[0]):
+        for j in range(output_size[1]):
+            # float64
             block = scipy.fft.dctn(
-                    a[
+                    img[
                         i*block_size:(i+1)*block_size,
                         j*block_size:(j+1)*block_size
                     ],
@@ -36,43 +46,49 @@ def bwdct(a: np.ndarray, block_size=8, qt=None, is_zzsqt=False, with_pad=True) -
                 ).ravel()
             if qt is not None:
                 block = np.round(block / qt)
-            ret[i:i+1, j:j+1] = block
-    return ret
+                if trunc_only:
+                    block = block * qt
+            coef[i:i+1, j:j+1] = block
+    return coef
 
 
 def bwidct(
-        a: np.ndarray, block_size=8,
+        coef: np.ndarray, block_size=8,
         qt=None, is_zzsqt=False, src_size=None) -> np.ndarray:
     """JPEGで利用されるブロックごとのDCT係数から元配列を復元します。
 
     Args:
-        a: 変換対象の二次元配列
+        coef: 変換対象の二次元配列
         block_size: DCTが行われたブロックのサイズ
 
     Returns:
         復元された二次元配列
 
     Todo:
-         * 並列計算に対応する。(skimage.restoration.cycle_spinとか?)
+         * skimage.restoration.cycle_spinの調査
     """
     if qt is not None and is_zzsqt:
         qt = scanning.zigzag(qt, block_size=block_size, inverse=True)
-    h = a.shape[0] * block_size
-    w = a.shape[1] * block_size
-    ret = np.zeros((h, w))
-    for i in range(h // block_size):
-        for j in range(w // block_size):
-            block = a[i, j]
+    output_size = (
+        coef.shape[0] * block_size,
+        coef.shape[1] * block_size
+    )
+    img = np.zeros(output_size, dtype=np.uint8)
+    for i in range(output_size[0] // block_size):
+        for j in range(output_size[1] // block_size):
+            block = coef[i, j]
             if qt is not None:
                 block = block * qt
+            # float32
             block = scipy.fft.idctn(
                     block.reshape((block_size, block_size)),
                     axes=[0, 1], norm='ortho'
                 )
-            ret[
-                i*block_size:(i+1)*block_size,
-                j*block_size:(j+1)*block_size] = block
-    return ret if src_size is None else ret[:src_size[0], :src_size[1]]
+            img[
+                i * block_size:(i + 1) * block_size,
+                j * block_size:(j + 1) * block_size
+            ] = block.clip(0, 255).astype(np.uint8)
+    return img if src_size is None else img[:src_size[0], :src_size[1]]
 
 
 if __name__ == '__main__':

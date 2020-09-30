@@ -1,3 +1,5 @@
+import tensorflow as tf
+from tensorflow import keras
 from tensorflow.keras.models import Model
 from tensorflow.keras.layers import (
     Input, Reshape, Dense, Flatten,
@@ -10,27 +12,41 @@ def make_generator(z_dim: int):
     x = inputs
 
     x = Dense(
-        2 * 2 * z_dim * 4, use_bias=False,
-        name='dense1')(x)
-    x = BatchNormalization(name='bn1')(x)
-    x = LeakyReLU(name='act1')(x)
-    x = Reshape((2, 2, z_dim * 4), name='reshape1')(x)
+        4 * 4 * 512, use_bias=True,
+        name='g_dense1')(x)
+    x = BatchNormalization(name='g_bn1')(x)
+    x = LeakyReLU(name='g_act1')(x)
+    x = Reshape((4, 4, 512), name='g_reshape1')(x)
 
     x = Conv2DTranspose(
-        z_dim * 2, 3, padding='same', use_bias=False,
-        name='deconv4')(x)
-    x = BatchNormalization(name='bn4')(x)
-    x = LeakyReLU(name='act4')(x)
+        256, 3, padding='same', use_bias=True,
+        name='g_deconv2')(x)
+    x = BatchNormalization(name='g_bn2')(x)
+    x = LeakyReLU(name='g_act2')(x)
+
+    # x = Conv2DTranspose(
+    #     256, 3, padding='same', use_bias=True,
+    #     name='g_deconv3')(x)
+    # x = BatchNormalization(name='g_bn3')(x)
+    # x = LeakyReLU(name='g_act3')(x)
 
     x = Conv2DTranspose(
-        z_dim, 3, padding='same', use_bias=False,
-        name='deconv5')(x)
-    x = BatchNormalization(name='bn5')(x)
-    x = LeakyReLU(name='act5')(x)
+        128, 3, padding='same', use_bias=True,
+        name='g_deconv4')(x)
+    x = BatchNormalization(name='g_bn4')(x)
+    x = LeakyReLU(name='g_act4')(x)
+
+    # x = Conv2DTranspose(
+    #     128, 3, padding='same', use_bias=True,
+    #     name='g_deconv5')(x)
+    # x = BatchNormalization(name='g_bn5')(x)
+    # x = LeakyReLU(name='g_act5')(x)
 
     x = Conv2DTranspose(
-        64, 3, strides=2, padding='same', use_bias=False,
+        64, 3, strides=1, padding='same', use_bias=True,
         name='generator_output')(x)
+
+    x *= 25
 
     model = Model(inputs, x, name='mnist_dct_generator')
     return model
@@ -40,21 +56,28 @@ def make_discriminator(z_dim: int):
     inputs = Input((4, 4, 64), name='generator_input')
     x = inputs
 
-    x = Conv2D(
-        z_dim // 2, 3, padding='same',
-        name='conv1')(x)
-    x = BatchNormalization(name='bn1')(x)
-    x = LeakyReLU(name='act1')(x)
-    x = Dropout(0.3, name='drop1')(x)
+    # x = Conv2D(
+    #     64, 3, padding='same',
+    #     name='d_conv1')(x)
+    # x = BatchNormalization(name='d_bn1')(x)
+    # x = LeakyReLU(name='d_act1')(x)
+    # x = Dropout(0.3, name='d_drop1')(x)
 
     x = Conv2D(
-        z_dim, 3, padding='same',
-        name='conv3')(x)
-    x = BatchNormalization(name='bn3')(x)
-    x = LeakyReLU(name='act3')(x)
-    x = Dropout(0.3, name='drop3')(x)
+        128, 3, padding='same',
+        name='d_conv2')(x)
+    x = BatchNormalization(name='d_bn2')(x)
+    x = LeakyReLU(name='d_act2')(x)
+    x = Dropout(0.3, name='d_drop2')(x)
 
-    x = Flatten(name='flatten')(x)
+    x = Conv2D(
+        256, 3, padding='same',
+        name='d_conv3')(x)
+    x = BatchNormalization(name='d_bn3')(x)
+    x = LeakyReLU(name='d_act3')(x)
+    x = Dropout(0.3, name='d_drop3')(x)
+
+    x = Flatten(name='d_flatten')(x)
     x = Dense(1, name='discriminator_output')(x)
     model = Model(inputs, x, name='mnist_dct_discriminator')
     return model

@@ -10,23 +10,29 @@ def make_generator(z_dim: int):
     x = inputs
 
     x = Dense(
-        7 * 7 * z_dim * 2, use_bias=False,
+        4 * 4 * 512, use_bias=False,
         name='dense1')(x)
     x = BatchNormalization(name='bn1')(x)
     x = LeakyReLU(name='act1')(x)
-    x = Reshape((7, 7, z_dim * 2), name='reshape1')(x)
+    x = Reshape((4, 4, 512), name='reshape1')(x)
 
     x = Conv2DTranspose(
-        z_dim, 5, padding='same', use_bias=False,
+        256, 5, padding='same', use_bias=False,
         name='deconv2')(x)
     x = BatchNormalization(name='bn2')(x)
     x = LeakyReLU(name='act2')(x)
 
     x = Conv2DTranspose(
-        z_dim // 2, 5, strides=2, padding='same', use_bias=False,
+        128, 5, strides=2, padding='same', use_bias=False,
         name='deconv3')(x)
     x = BatchNormalization(name='bn3')(x)
     x = LeakyReLU(name='act3')(x)
+
+    x = Conv2DTranspose(
+        64, 5, strides=2, padding='same', use_bias=False,
+        name='deconv4')(x)
+    x = BatchNormalization(name='bn4')(x)
+    x = LeakyReLU(name='act4')(x)
 
     x = Conv2DTranspose(
         1, 5, strides=2, padding='same', activation='tanh', use_bias=False,
@@ -37,22 +43,29 @@ def make_generator(z_dim: int):
 
 
 def make_discriminator(z_dim: int):
-    inputs = Input((28, 28, 1), name='generator_input')
+    inputs = Input((32, 32, 1), name='generator_input')
     x = inputs
 
     x = Conv2D(
-        z_dim // 2, 5, strides=2, padding='same',
+        64, 5, strides=2, padding='same',
         name='conv1')(x)
     x = BatchNormalization(name='bn1')(x)
     x = LeakyReLU(name='act1')(x)
     x = Dropout(0.3, name='drop1')(x)
 
     x = Conv2D(
-        z_dim, 5, strides=2, padding='same',
+        128, 5, strides=2, padding='same',
         name='conv2')(x)
     x = BatchNormalization(name='bn2')(x)
     x = LeakyReLU(name='act2')(x)
     x = Dropout(0.3, name='drop2')(x)
+
+    x = Conv2D(
+        256, 5, strides=2, padding='same',
+        name='conv3')(x)
+    x = BatchNormalization(name='bn3')(x)
+    x = LeakyReLU(name='act3')(x)
+    x = Dropout(0.3, name='drop3')(x)
 
     x = Flatten(name='flatten')(x)
     x = Dense(1, name='discriminator_output')(x)
@@ -61,8 +74,8 @@ def make_discriminator(z_dim: int):
 
 
 if __name__ == '__main__':
-    generator = make_generator(100)
+    generator = make_generator(128)
     generator.summary()
 
-    discriminator = make_discriminator(100)
+    discriminator = make_discriminator(128)
     discriminator.summary()

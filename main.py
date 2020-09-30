@@ -11,6 +11,9 @@ import numpy as np
 import tensorflow as tf
 from tensorflow import keras
 
+from util.data.mod import get_specific_labeled
+from util.image.shape import tile_images
+
 from train import train_step
 from models.mnist import make_discriminator
 from models.mnist import make_generator
@@ -27,6 +30,10 @@ ARGUMENT_PARSER.add_argument(
     '-e', '--epochs', help='学習エポック数を指定します。',
     type=int, default=100, metavar='E'
 )
+ARGUMENT_PARSER.add_argument(
+    '--dataset', help='データセットを指定します。',
+    type=str, default='mnist', choices=['mnist', 'fashion_mnist', 'cifar10']
+)
 # 画像生成に関する引数
 ARGUMENT_PARSER.add_argument(
     '--target-labels', help='学習する画像のラベルを1つ以上指定します。',
@@ -34,7 +41,7 @@ ARGUMENT_PARSER.add_argument(
 )
 ARGUMENT_PARSER.add_argument(
     '-z', '--z-dim', help='潜在空間のサイズを指定します。',
-    type=int, default=100, metavar='Z'
+    type=int, default=128, metavar='Z'
 )
 # 結果に関する引数
 ARGUMENT_PARSER.add_argument(
@@ -47,7 +54,7 @@ ARGUMENT_PARSER.add_argument(
 )
 ARGUMENT_PARSER.add_argument(
     '--num-samples', help='結果を見るためのサンプル数を指定します。',
-    type=int, default=16, choices=[4, 16, 36, 64, 100]
+    type=int, default=16
 )
 ARGUMENT_PARSER.add_argument(
     '--sample-frequency', help='サンプルを出力する頻度をエポック数で指定します。',
@@ -71,44 +78,31 @@ pfp = \
 PFP = {'fontproperties': pfp}
 matplotlib.rcParams['savefig.dpi'] = 350
 
-OUTPUT_DIR = Path(LAUNCH_DATETIME.strftime('./outputs/mnist_%Y%m%d%H%M%S'))
+OUTPUT_DIR = Path(
+    LAUNCH_DATETIME.strftime(f'./outputs/{ARGS.dataset}_%Y%m%d%H%M%S'))
 OUTPUT_SAMPLE_DIR = OUTPUT_DIR.joinpath('samples')
 OUTPUT_SAMPLE_DIR.mkdir(parents=True)
 OUTPUT_MODEL_DIR = OUTPUT_DIR.joinpath('models')
 OUTPUT_MODEL_DIR.mkdir(parents=True)
 
-# 生成画像や訓練に関する定数の定義
-NUM_SAMPLES_SQRT = int(np.sqrt(ARGS.num_samples))  # テストとして生成する画像数の平方根
-
 # データのロード
-train_data, test_data = keras.datasets.mnist.load_data()
+if ARGS.dataset == 'mnist':
+    train_data, test_data = keras.datasets.mnist.load_data()
+elif ARGS.dataset == 'fashion_mnist':
+    train_data, test_data = keras.datasets.fashion_mnist.load_data()
 train_images, train_labels = train_data
 test_images, test_labels = test_data
 
-if ARGS.target_labels is None:
-    num_target_images = train_images.shape[0] + test_images.shape[0]
+all_images = np.concatenate([train_images, test_images])
+all_images = np.pad(all_images, [[0, 0], [2, 2], [2, 2]])
+all_labels = np.concatenate([train_labels, test_labels])
+
+if ARGS.target_labels is not None:
+    images = get_specific_labeled(all_images, all_labels, ARGS.target_labels)
 else:
-    num_target_images = 0
-    for l in ARGS.target_labels:
-        num_target_images += \
-            np.count_nonzero(train_labels == l) + \
-            np.count_nonzero(test_labels == l)
+    images = all_images
 
-images = np.zeros((num_target_images, 28, 28, 1))
-k = 0
-for image, label in \
-    chain.from_iterable(
-        [zip(train_images, train_labels), zip(test_images, test_labels)]):
-    if ARGS.target_labels is not None and label not in ARGS.target_labels:
-        continue
-    images[k] = \
-        (image.reshape(28, 28, 1).astype(np.float32) - 127.5) / 127.5
-    k += 1
-
-del train_images
-del train_labels
-del test_images
-del test_labels
+images = images.astype(np.float32) / 255 - 0.5
 
 # データセットの作成
 dataset = \
@@ -121,26 +115,15 @@ generator = make_generator(ARGS.z_dim)
 discriminator = make_discriminator(ARGS.z_dim)
 
 # テスト画像を生成するためのシード値
-seed = tf.random.normal([NUM_SAMPLES_SQRT ** 2, ARGS.z_dim])
+seed = tf.random.normal([ARGS.num_samples, ARGS.z_dim])
 
 # matplotlibで表示するための諸々
-fig, axs = plt.subplots(NUM_SAMPLES_SQRT, NUM_SAMPLES_SQRT)
-fig.subplots_adjust(left=0, right=1, hspace=0.1, wspace=-0.6)
-axs = list(chain.from_iterable(axs))
+fig, axs = plt.subplots(1, ARGS.num_samples)
+# fig.subplots_adjust(left=0, right=1, hspace=0.1, wspace=-0.6)
+fig.subplots_adjust(left=0, right=1)
+# axs = list(chain.from_iterable(axs))
 
-
-def tile_images(imgs: np.ndarray, num_h, num_w):
-    tile = np.zeros(
-        (num_h*imgs.shape[1], num_w*imgs.shape[2], imgs.shape[3]),
-        dtype=np.uint8)
-    k = 0
-    for i in range(0, tile.shape[0], imgs.shape[1]):
-        for j in range(0, tile.shape[1], imgs.shape[2]):
-            tile[i:i+imgs.shape[1], j:j+imgs.shape[2]] = \
-                imgs[k]
-            k += 1
-    return np.squeeze(tile)
-
+epoch_durations = []
 
 # 訓練フェーズ
 for epoch in range(ARGS.epochs):
@@ -150,8 +133,14 @@ for epoch in range(ARGS.epochs):
             train_step(image_batch, ARGS.z_dim, generator, discriminator)
         print(f' - Generator Loss: {gen_loss:.6f}, ', end='')
         print(f'Discriminator Loss: {dis_loss:.6f}', end='\r')
-    print(f'>> エポックが完了しました。 経過時間: {perf_counter() - begin_time:.7f}[s]')
-    if not ARGS.no_sample or ARGS.plot:
+        end_time = perf_counter()
+    epoch_duration = end_time - begin_time
+    epoch_durations.append(epoch_duration)
+    print(f'\n>> {epoch+1}エポックが完了しました。 経過時間: {epoch_duration:.7f}[s]')
+    if not ARGS.no_sample and (
+            epoch == 0
+            or (epoch + 1) % ARGS.sample_frequency == 0
+            or epoch == ARGS.epochs - 1):
         imgs = \
             (generator(seed, training=False) * 127.5 + 127.5).numpy()\
             .astype(np.uint8)
@@ -162,24 +151,26 @@ for epoch in range(ARGS.epochs):
                 ax.set_xticks([])
                 ax.set_yticks([])
                 ax.imshow(np.squeeze(img), cmap='gray')
-            plt.pause(0.01)
-        if not ARGS.no_sample and epoch % ARGS.sample_frequency == 0:
-            cv2.imwrite(
-                str(OUTPUT_SAMPLE_DIR.joinpath(f'{epoch+1:06d}.png')),
-                tile_images(imgs, NUM_SAMPLES_SQRT, NUM_SAMPLES_SQRT))
-        if epoch % ARGS.save_frequency == 0:
-            generator.save(
-                OUTPUT_MODEL_DIR.joinpath(f'generator_{epoch+1:06d}.h5'))
-            discriminator.save(
-                OUTPUT_MODEL_DIR.joinpath(f'discriminator_{epoch+1:06d}.h5'))
+            plt.pause(0.001)
+        cv2.imwrite(
+            str(OUTPUT_SAMPLE_DIR.joinpath(f'{epoch+1:06d}.png')),
+            tile_images(imgs, 1, ARGS.num_samples))
+    if not ARGS.no_save and (
+            (epoch + 1) % ARGS.save_frequency == 0
+            or epoch == ARGS.epochs - 1):
+        generator.save(
+            OUTPUT_MODEL_DIR.joinpath(f'generator_{epoch+1:06d}.h5'))
+        discriminator.save(
+            OUTPUT_MODEL_DIR.joinpath(f'discriminator_{epoch+1:06d}.h5'))
 
-cv2.imwrite(
-    str(OUTPUT_SAMPLE_DIR.joinpath(f'{epoch+1:06d}.png')),
-    tile_images(
-        (generator(seed, training=False) * 127.5 + 127.5)
-        .numpy().astype(np.uint8),
-        NUM_SAMPLES_SQRT, NUM_SAMPLES_SQRT))
-generator.save(
-    OUTPUT_MODEL_DIR.joinpath(f'generator_{epoch+1:06d}.h5'))
-discriminator.save(
-    OUTPUT_MODEL_DIR.joinpath(f'discriminator_{epoch+1:06d}.h5'))
+print(f'>> 平均エポック時間: {np.mean(epoch_durations[1:]):.7f}[s]')
+
+generation_durations = []
+for i in range(1000):
+    print(f'>> 生成時間検証のために画像生成中... [{i+1}/1000]', end='\r')
+    begin_time = perf_counter()
+    test_seed = tf.random.normal([1000, ARGS.z_dim])
+    imgs = generator(test_seed, training=False)
+    end_time = perf_counter()
+    generation_durations.append(end_time - begin_time)
+print(f'\n>> 生成時間(1000枚): {np.mean(generation_durations):.7f}[s]')
