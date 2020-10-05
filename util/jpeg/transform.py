@@ -33,7 +33,7 @@ def bwdct(
             [0, output_size[0] * block_size - img.shape[0]],
             [0, output_size[0] * block_size - img.shape[1]]
         ])
-    coef = np.zeros(output_size, dtype=np.float64)
+    coef = np.zeros(output_size, dtype=np.float32)
     for i in range(output_size[0]):
         for j in range(output_size[1]):
             # float64
