@@ -21,7 +21,7 @@ import torchvision.datasets as dset
 import torchvision.transforms as transforms
 
 from util.image.shape import tile_images
-from util.jpeg.transform import (bwdct, bwidct)
+from util.jpeg.transform import (BlockwiseDCT, Quantize, LowPassFilter)
 from util.jpeg.jpegfile import inspect
 from util.jpeg.scanning import zigzag
 
@@ -53,6 +53,10 @@ ARGUMENT_PARSER.add_argument(
 ARGUMENT_PARSER.add_argument(
     '--form', help='データをどのような形状で読み込むかを指定します。',
     type=str, default='rgb_pixels', choices=['rgb_pixels', 'jpeg_blocks']
+)
+ARGUMENT_PARSER.add_argument(
+    '--low-pass-ratio', help='Low Passフィルターの割合を設定します。1.0でフィルターしません。',
+    type=float, default=1.0
 )
 ARGUMENT_PARSER.add_argument(
     '--criterion', help='訓練時に使用する損失関数を指定します。',
@@ -165,40 +169,13 @@ class AutoDevice:
 auto_device = AutoDevice()
 
 
-class BlockwiseDCT(object):
-    def __init__(self, jpeg_path: str = './assets/q90_420.jpg'):
-        self.qt = inspect(jpeg_path)['quantization_table0']
-        self.qt = zigzag(self.qt, inverse=True)
-
-    def __call__(self, sample):
-        sample = np.asarray(sample)
-        compressed = bwdct(sample, qt=self.qt, trunc_only=True)
-        # compressed = bwdct(sample)
-        return compressed
-
-
-class BlockwiseIDCT(object):
-    def __init__(self, jpeg_path: str = './assets/q90_420.jpg'):
-        self.qt = inspect(jpeg_path)['quantization_table0']
-        self.qt = zigzag(self.qt, inverse=True)
-
-    def __call__(self, sample):
-        sample = np.asarray(sample)
-        image = bwidct(sample)
-        return image
-
-
-class Denormalize(object):
-    def __init__(self, mean, std):
-        self.mean = mean
-        self.std = std
-
-    def __call__(self, tensor):
+class Normalize(transforms.Normalize):
+    def inverse(self, tensor):
         """
         Args:
-            tensor (Tensor): Tensor image of size (C, H, W) to be normalized.
+            tensor (Tensor): Tensor image of size (C, H, W) to be denormalized.
         Returns:
-            Tensor: Normalized image.
+            Tensor: Denormalized image.
         """
         for t, m, s in zip(tensor, self.mean, self.std):
             # 正規化: t.sub_(m).div_(s)
@@ -217,10 +194,26 @@ if ARGS.dataset == 'mnist' or ARGS.dataset == 'fashion_mnist':
 else:
     dataset_transforms.append(transforms.Grayscale())
 
+bwdct = BlockwiseDCT((32, 32))
+
+quantization_table = zigzag(
+    inspect('./assets/q90_420.jpg')['quantization_table0'], inverse=True)
+quantize = Quantize(quantization_table)
+
+bw_lpf = LowPassFilter(ARGS.low_pass_ratio)
+
+if ARGS.form == 'rgb_pixels':
+    NUM_FEATURES = 1
+elif ARGS.form == 'jpeg_blocks':
+    NUM_FEATURES = bw_lpf.new_num_coefficients
+
+
 if ARGS.form == 'jpeg_blocks':
-    dataset_transforms.append(
-        BlockwiseDCT())
-    blockwise_idct = BlockwiseIDCT()
+    dataset_transforms.extend([
+        bwdct,
+        quantize,
+        bw_lpf
+    ])
 
 to_tensor = transforms.ToTensor()
 dataset_transforms.append(to_tensor)
@@ -228,10 +221,8 @@ dataset_transforms.append(to_tensor)
 norm_funcs = {}
 
 if ARGS.form == 'rgb_pixels':
-    norm_funcs['rgb_pixels'] = (
-        transforms.Normalize(MEAN_GRAYSCALE, STD_GRAYSCALE),
-        Denormalize(MEAN_GRAYSCALE, STD_GRAYSCALE))
-    dataset_transforms.append(norm_funcs['rgb_pixels'][0])
+    norm_funcs['rgb_pixels'] = Normalize(MEAN_GRAYSCALE, STD_GRAYSCALE)
+    dataset_transforms.append(norm_funcs['rgb_pixels'])
 
 
 def load_dataset(dataset_name: str, transform=None):
@@ -274,7 +265,7 @@ if ARGS.form == 'jpeg_blocks':
     #     transforms.Normalize(MEAN_JPEG_BLOCKS, STD_JPEG_BLOCKS),
     #     Denormalize(MEAN_JPEG_BLOCKS, STD_JPEG_BLOCKS))
     # for image in images_preloaded:
-    #     norm_funcs['jpeg_blocks'][0](image)
+    #     norm_funcs['jpeg_blocks'](image)
     labels_preloaded = torch.cat(labels_preloaded)
     dataset = torch.utils.data.TensorDataset(
         images_preloaded, labels_preloaded)
@@ -294,7 +285,7 @@ if ARGS.fid:
     else:
         fid_dataset_transforms = [
             e for e in dataset_transforms
-            if not isinstance(e, (BlockwiseDCT, transforms.Normalize))]
+            if not isinstance(e, (BlockwiseDCT, Normalize))]
         fid_dataset, _ = load_dataset(ARGS.dataset, fid_dataset_transforms)
         fid_dataloader = torch.utils.data.DataLoader(
             fid_dataset, batch_size=ARGS.fid_batch_size, drop_last=True)
@@ -331,16 +322,11 @@ if ARGS.fid:
 if ARGS.fid_num_samples < 2048:
     ARGS.fid_num_samples = 2048
 
-if ARGS.form == 'rgb_pixels':
-    IMAGE_CHANNELS = 1
-elif ARGS.form == 'jpeg_blocks':
-    IMAGE_CHANNELS = 64
-
 model_g = Generator(
-    ARGS.z_dim, IMAGE_CHANNELS,
+    ARGS.z_dim, NUM_FEATURES,
     bias=True, num_classes=NUM_CLASSES, form=ARGS.form).to(auto_device(0))
 model_d = Discriminator(
-    IMAGE_CHANNELS, num_classes=NUM_CLASSES, form=ARGS.form).to(auto_device(0))
+    NUM_FEATURES, num_classes=NUM_CLASSES, form=ARGS.form).to(auto_device(0))
 # summary(model_g, (ARGS.z_dim,))
 # summary(model_d, (1, 32, 32))
 
@@ -379,16 +365,16 @@ criterion = criterion_module.Criterion(ARGS.batch_size, auto_device(0))
 
 def to_images(tensors, form: str = 'rgb_pixels', norm_funcs=None):
     if form in norm_funcs:
-        denormalize = norm_funcs[form][1]
+        normalize = norm_funcs[form]
         for tensor in tensors:
-            denormalize(tensor)
+            normalize.inverse(tensor)
     if form == 'rgb_pixels':
         images = tensors.permute(0, 2, 3, 1).numpy()
     elif form == 'jpeg_blocks':
         coefs = tensors.permute(0, 2, 3, 1).numpy()
         images = np.zeros((coefs.shape[0], 32, 32, 1))
         for i, coef in enumerate(coefs):
-            images[i] = np.expand_dims(blockwise_idct(coef), -1)
+            images[i] = np.expand_dims(bwdct.inverse(bw_lpf.inverse(coef)), -1)
             images[i] /= images[i].max()
     images *= 255
     return images.clip(0, 255).astype(np.uint8)

@@ -12,8 +12,17 @@ JPEG圧縮過程を利用したDCGAN
 |Move|移動|
 |Modify|変更|
 
-## 参考文献
+## リポジトリ
+### [uber-research/jpeg2dct](https://github.com/uber-research/jpeg2dct)
 
+### [TonyMooori/dct_2dim.py](https://gist.github.com/TonyMooori/661a2da7cbb389f0a99c)
+
+## ライブラリ
+### [kornia](https://kornia.github.io/)
+GPU上で動作するData Augmentationライブラリ
+[Documentation](https://kornia.readthedocs.io/en/latest/index.html)
+
+## 参考文献
 ### [Accurate, Large Minibatch SGD: Training ImageNet in 1 Hour](https://arxiv.org/abs/1706.02677)
 学習率をバッチサイズに比例させるLinear Scalingを行う。
 

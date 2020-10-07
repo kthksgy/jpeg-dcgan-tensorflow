@@ -1,114 +1,122 @@
-from math import ceil
+from typing import Tuple, Union
 
 import numpy as np
-import scipy
-from . import scanning
+# https://docs.scipy.org/doc/scipy/reference/generated/scipy.fft.dctn.html#scipy.fft.dctn
+from scipy.fft import dctn, idctn
 
 
-def bwdct(
-        img: np.ndarray, block_size=8,
-        qt=None, is_zzsqt=False, trunc_only=False) -> np.ndarray:
-    """JPEGで利用されるブロックごとのDCTを行います。
+class BlockwiseDCT:
+    def __init__(
+        self, input_size: Tuple[int], block_size: Tuple[int] = (8, 8),
+        dtype=np.uint8
+    ):
+        self.input_size = input_size
+        self.block_size = block_size
+        assert self.input_size[0] % self.block_size[0] == 0, \
+            '入力の縦幅がブロックの縦幅で割り切れません。'
+        self.num_vblocks = self.input_size[0] // self.block_size[0]
+        assert self.input_size[1] % self.block_size[1] == 0, \
+            '入力の横幅がブロックの横幅で割り切れません。'
+        self.num_hblocks = self.input_size[1] // self.block_size[1]
+        self.num_coefficients = np.prod(block_size)
 
-    Args:
-        a: 変換対象の二次元配列
-        block_size: DCTを行うブロックのサイズ
+    def __call__(self, image, inplace=True):
+        return dctn(
+            self.__split(np.asarray(image)), type=2,
+            axes=[1, 2],
+            norm='ortho',
+            overwrite_x=inplace,
+            workers=-1
+        ) \
+            .reshape(
+                self.num_vblocks,
+                self.num_hblocks,
+                self.num_coefficients) \
+            .astype(np.float32)
 
-    Returns:
-        ブロックごとのDCT係数
+    def inverse(self, image, inplace=True, rescale=False):
+        output = self.__concatenate(idctn(
+            image.reshape(-1, self.block_size[0], self.block_size[1]), type=2,
+            axes=[1, 2],
+            norm='ortho',
+            overwrite_x=inplace,
+            workers=-1
+        ))
+        return output
 
-    Todo:
-         * skimage.restoration.cycle_spinの調査
-    """
-    if qt is not None and is_zzsqt:
-        qt = scanning.zigzag(qt, block_size=block_size, inverse=True)
-    output_size = (
-        ceil(img.shape[0] / block_size),
-        ceil(img.shape[1] / block_size),
-        block_size ** 2
-    )
-    img = np.pad(
-        img,
-        [
-            [0, output_size[0] * block_size - img.shape[0]],
-            [0, output_size[0] * block_size - img.shape[1]]
-        ])
-    coef = np.zeros(output_size, dtype=np.float32)
-    for i in range(output_size[0]):
-        for j in range(output_size[1]):
-            # float64
-            block = scipy.fft.dctn(
-                    img[
-                        i*block_size:(i+1)*block_size,
-                        j*block_size:(j+1)*block_size
-                    ],
-                    axes=[0, 1], norm='ortho'
-                ).ravel()
-            if qt is not None:
-                block = np.round(block / qt)
-                if trunc_only:
-                    block = block * qt
-            coef[i:i+1, j:j+1] = block
-    return coef
+    # https://stackoverflow.com/questions/16873441/form-a-big-2d-array-from-multiple-smaller-2d-arrays/16873755#16873755
+    def __split(self, image):
+        return image \
+            .reshape(
+                self.num_vblocks,
+                self.block_size[0],
+                -1,
+                self.block_size[1]) \
+            .swapaxes(1, 2) \
+            .reshape(-1, self.block_size[0], self.block_size[1])
 
-
-def bwidct(
-        coef: np.ndarray, block_size=8,
-        qt=None, is_zzsqt=False, src_size=None) -> np.ndarray:
-    """JPEGで利用されるブロックごとのDCT係数から元配列を復元します。
-
-    Args:
-        coef: 変換対象の二次元配列
-        block_size: DCTが行われたブロックのサイズ
-
-    Returns:
-        復元された二次元配列
-
-    Todo:
-         * skimage.restoration.cycle_spinの調査
-    """
-    if qt is not None and is_zzsqt:
-        qt = scanning.zigzag(qt, block_size=block_size, inverse=True)
-    output_size = (
-        coef.shape[0] * block_size,
-        coef.shape[1] * block_size
-    )
-    img = np.zeros(output_size, dtype=np.uint8)
-    for i in range(output_size[0] // block_size):
-        for j in range(output_size[1] // block_size):
-            block = coef[i, j]
-            if qt is not None:
-                block = block * qt
-            # float32
-            block = scipy.fft.idctn(
-                    block.reshape((block_size, block_size)),
-                    axes=[0, 1], norm='ortho'
-                )
-            img[
-                i * block_size:(i + 1) * block_size,
-                j * block_size:(j + 1) * block_size
-            ] = block.clip(0, 255).astype(np.uint8)
-    return img if src_size is None else img[:src_size[0], :src_size[1]]
+    def __concatenate(self, blocks):
+        return blocks \
+            .reshape(
+                self.num_vblocks,
+                -1,
+                self.block_size[0],
+                self.block_size[1]) \
+            .swapaxes(1, 2) \
+            .reshape(self.input_size[0], self.input_size[1])
 
 
-if __name__ == '__main__':
-    import matplotlib.pyplot as plt
+class Quantize:
+    def __init__(
+        self, table: Union[np.ndarray, Tuple[np.ndarray]],
+        round_only: bool = True
+    ):
+        # INDICES: y = 0, cb = 1, cr = 2
+        self.table = \
+            table if isinstance(table, tuple) \
+            else (table,)
+        assert all([
+            isinstance(e, np.ndarray)
+            and e.ndim == 1
+            for e in self.table
+        ]), '量子化テーブルは1次元のNumPy配列で指定してください。'
+        self.round_only = round_only
 
-    src = np.random.randint(0, 256, size=(28, 28), dtype=np.uint8)
+    def __call__(self, blocks, idx: int = 0):
+        blocks /= self.table[idx]
+        blocks = np.round(blocks, out=blocks)
+        if self.round_only:
+            blocks *= self.table[idx]
+        return blocks
 
-    coefs = bwdct(src, with_pad=True)
-    rstr = bwidct(coefs, src_size=src.shape)
 
-    src = src.astype(np.uint8)
-    rstr = rstr.astype(np.uint8)
+class LowPassFilter:
+    def __init__(
+        self, ratio: float, block_size: Tuple[int] = (8, 8),
+    ):
+        self.block_size = block_size
+        self.new_block_size = (
+            int(self.block_size[0] * ratio),
+            int(self.block_size[1] * ratio)
+        )
+        self.new_num_coefficients = np.prod(self.new_block_size)
+        self.padding = (
+            (0, 0), (0, 0),
+            (0, self.block_size[0] - self.new_block_size[0]),
+            (0, self.block_size[1] - self.new_block_size[1]),
+        )
 
-    fig, axs = plt.subplots(1, 3)
-    ax_src, ax_rstr, ax_diff = axs
+    def __call__(self, blocks):
+        return blocks \
+            .reshape(blocks.shape[:-1] + self.block_size)[
+                :,
+                :,
+                :self.new_block_size[0],
+                :self.new_block_size[1]] \
+            .reshape(blocks.shape[:-1] + (-1,))
 
-    fig.suptitle('Blockwise DCT Sample')
-    ax_src.imshow(src, cmap='gray')
-    ax_rstr.imshow(rstr, cmap='gray')
-    ax_diff.imshow((rstr - src).astype(np.float32) / 255., cmap='gray')
-    # assert (rstr == src).all()
-
-    plt.show()
+    def inverse(self, blocks):
+        return np.pad(
+            blocks.reshape(blocks.shape[:-1] + self.new_block_size),
+            self.padding) \
+            .reshape(blocks.shape[:-1] + (-1,))

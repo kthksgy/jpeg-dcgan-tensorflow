@@ -18,9 +18,9 @@ def init_xavier_uniform(layer):
 class GBlock(nn.Module):
     def __init__(
         self, in_channels: int, out_channels: int,
-        kernel_size: Union[int, Tuple(int, int)],
-        stride: Union[int, Tuple(int, int)] = 1,
-        padding: Union[int, Tuple(int, int)] = 0,
+        kernel_size: Union[int, Tuple[int, int]],
+        stride: Union[int, Tuple[int, int]] = 1,
+        padding: Union[int, Tuple[int, int]] = 0,
         bias: bool = True,
         num_classes: int = 0
     ):
@@ -83,7 +83,6 @@ class Generator(nn.Module):
             self.block3 = None
             self.block4 = None
             self.out = nn.Sequential(
-                # Self-Attention Generative Adversarial Networks
                 SelfAttention(64),
                 nn.LeakyReLU(0.3),
                 # (64, 4, 4) -> (64, 4, 4)
@@ -109,9 +108,9 @@ class Generator(nn.Module):
 class DBlock(nn.Module):
     def __init__(
         self, in_channels: int, out_channels: int,
-        kernel_size: Union[int, Tuple(int, int)],
-        stride: Union[int, Tuple(int, int)] = 1,
-        padding: Union[int, Tuple(int, int)] = 0,
+        kernel_size: Union[int, Tuple[int, int]],
+        stride: Union[int, Tuple[int, int]] = 1,
+        padding: Union[int, Tuple[int, int]] = 0,
         num_classes: int = 0, prob_dropout: float = 0.5
     ):
         super().__init__()
@@ -159,7 +158,6 @@ class Discriminator(nn.Module):
 
         self.main = nn.Sequential(*self.__sequential)
         self.last = nn.Linear(128, 1)
-        self.sigmoid = nn.Sigmoid()
         if num_classes > 0:
             self.sn_embedding = spectral_norm(nn.Embedding(num_classes, 128))
             nn.init.xavier_normal_(self.sn_embedding.weight, gain=1)
@@ -175,4 +173,4 @@ class Discriminator(nn.Module):
         if labels is not None:
             h *= self.sn_embedding(labels)
         # Real(1) or Fake(0)を出力する
-        return self.sigmoid(self.last(h))
+        return torch.sigmoid(self.last(h))
