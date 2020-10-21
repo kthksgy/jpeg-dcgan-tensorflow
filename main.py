@@ -543,7 +543,10 @@ if ARGS.test:
         for _ in range(1000):
             torch.randn(ARGS.batch_size, ARGS.z_dim, out=z)
             torch.randint(0, NUM_CLASSES, (ARGS.batch_size,), out=labels)
-            model_g(z, labels)
+            # model_g(z, labels)
+            to_images(
+                model_g(z, labels).detach().cpu(),
+                form=ARGS.form, norm_funcs=norm_funcs)
         end_time = perf_counter()
     tmpstr = f'生成時間(1バッチ{ARGS.batch_size}枚×{1000}回): '\
         f'{end_time - begin_time:.07f}[s]'

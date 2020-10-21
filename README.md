@@ -55,6 +55,38 @@ Discriminatorの最終層の特徴とクラスを埋め込んだベクトルの�
 }
 ```
 
+### [Conditional Generative Adversarial Nets](https://arxiv.org/abs/1411.1784)
+cGANの論文。
+
+`Mirza, M., & Osindero, S. (2014). Conditional generative adversarial nets. arXiv preprint arXiv:1411.1784.`
+
+```bibtex
+@misc{mirza2014conditional,
+      title={Conditional Generative Adversarial Nets}, 
+      author={Mehdi Mirza and Simon Osindero},
+      year={2014},
+      eprint={1411.1784},
+      archivePrefix={arXiv},
+      primaryClass={cs.LG}
+}
+```
+
+### [Conditional Image Synthesis With Auxiliary Classifier GANs](https://arxiv.org/abs/1610.09585)
+ACGANの論文。
+
+`Odena, A., Olah, C., & Shlens, J. (2017, July). Conditional image synthesis with auxiliary classifier gans. In International conference on machine learning (pp. 2642-2651).`
+
+```bibtex
+@misc{odena2017conditional,
+      title={Conditional Image Synthesis With Auxiliary Classifier GANs}, 
+      author={Augustus Odena and Christopher Olah and Jonathon Shlens},
+      year={2017},
+      eprint={1610.09585},
+      archivePrefix={arXiv},
+      primaryClass={stat.ML}
+}
+```
+
 ### [GANs Trained by a Two Time-Scale Update Rule Converge to a Local Nash Equilibrium](https://arxiv.org/abs/1706.08500)
 GeneratorとDiscriminatorでそれぞれ異なる学習率を適用する。
 
