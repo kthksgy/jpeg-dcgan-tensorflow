@@ -22,7 +22,9 @@ class FrechetInceptionDistance:
                             .children())[:-2]).to(self.device)
         self.inception_v3.eval()
         self.normalize = transforms.Normalize(
-            mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+            mean=[0.485, 0.456, 0.406],
+            std=[0.229, 0.224, 0.225],
+            inplace=True)
 
     def __call__(self, real_vectors, fake_vectors):
         assert real_vectors.shape == fake_vectors.shape\
@@ -37,12 +39,13 @@ class FrechetInceptionDistance:
             + np.trace(real_cov) + np.trace(fake_cov)\
             - 2 * np.trace(cov_mean)
 
-    def get_features(self, images):
+    def get_features(self, bat_images):
         with torch.no_grad():
-            images = F.interpolate(images, (299, 299))
-            if images.size()[1] == 1:
-                images = images.repeat(1, 3, 1, 1)
-            for image in images:
-                self.normalize(image)
-            tensors = self.inception_v3(images.to(self.device)).detach()
-            return np.squeeze(tensors.cpu().numpy())
+            bat_images = F.interpolate(bat_images, (299, 299))
+            if bat_images.size()[1] == 1:
+                bat_images = bat_images.repeat(1, 3, 1, 1)
+            map(self.normalize, bat_images)
+            # tensors = self.inception_v3(bat_images.to(self.device)).detach()
+            return np.squeeze(
+                self.inception_v3(bat_images.to(self.device))
+                .detach().cpu().numpy())

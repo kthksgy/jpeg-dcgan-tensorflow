@@ -1,4 +1,10 @@
+from typing import Tuple
+
 import numpy as np
+
+
+def make_grid(images: Tuple[Tuple[np.ndarray], ...]) -> np.ndarray:
+    return np.block(images)
 
 
 def tile_images(imgs: np.ndarray, num_h: int, num_w: int) -> np.ndarray:

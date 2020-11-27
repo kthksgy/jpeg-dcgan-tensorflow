@@ -49,7 +49,7 @@ class Generator(nn.Module):
     def __init__(
         self, in_channels: int, out_channels: int,
         bias: bool = True, num_classes: int = 0,
-        form: str = 'rgb_pixels'
+        form: str = 'grayscale'
     ):
         super().__init__()
         self.form = form
@@ -57,7 +57,7 @@ class Generator(nn.Module):
         self.block1 = GBlock(
                 in_channels, 64, 4, 1, padding=0,
                 bias=bias, num_classes=num_classes)
-        if self.form == 'rgb_pixels':
+        if self.form == 'grayscale':
             # (64, 4, 4) -> (32, 8, 8)
             self.block2 = GBlock(
                     64, 32, 4, 2, padding=1,
@@ -71,11 +71,11 @@ class Generator(nn.Module):
                     32, 16, 4, 2, padding=1,
                     bias=bias, num_classes=num_classes)
             self.out = nn.Sequential(
-                # (32, 32, 32) -> (out_channels, 32, 32)
+                # (16, 32, 32) -> (out_channels, 32, 32)
                 nn.ConvTranspose2d(16, out_channels, 1, padding=0, bias=bias),
                 nn.Tanh()
             )
-        elif self.form == 'jpeg_blocks':
+        elif self.form == 'jpeg':
             # (64, 4, 4) -> (64, 4, 4)
             self.block2 = GBlock(
                     64, 64, 3, 1, padding=1,
@@ -83,6 +83,7 @@ class Generator(nn.Module):
             self.block3 = None
             self.block4 = None
             self.out = nn.Sequential(
+                # NoSA時は以下の2つを消す
                 SelfAttention(64),
                 nn.LeakyReLU(0.3),
                 # (64, 4, 4) -> (64, 4, 4)
@@ -92,7 +93,6 @@ class Generator(nn.Module):
 
     def forward(
         self, inputs, labels=None,
-        form: str = 'rgb_pixels'
     ):
         x = inputs.view(inputs.size(0), inputs.size(1), 1, 1)
         x = self.block1(x, labels)
@@ -111,13 +111,14 @@ class DBlock(nn.Module):
         kernel_size: Union[int, Tuple[int, int]],
         stride: Union[int, Tuple[int, int]] = 1,
         padding: Union[int, Tuple[int, int]] = 0,
+        bias: bool = True,
         num_classes: int = 0, prob_dropout: float = 0.5
     ):
         super().__init__()
         self.conv = spectral_norm(
             nn.Conv2d(
                 in_channels, out_channels,
-                kernel_size, stride, padding))
+                kernel_size, stride, padding, bias=bias))
         self.dropout = nn.Dropout2d(prob_dropout)
         self.activation = nn.LeakyReLU(0.3, True)
 
@@ -130,12 +131,12 @@ class DBlock(nn.Module):
 class Discriminator(nn.Module):
     def __init__(
         self, in_channels: int,
-        num_classes: int = 0, form: str = 'rgb_pixels'
+        num_classes: int = 0, form: str = 'grayscale'
     ):
         super().__init__()
         self.form = form
         self.__sequential = []
-        if self.form == 'rgb_pixels':
+        if self.form == 'grayscale':
             self.__sequential.extend([
                 # (in_channels, 32, 32) -> (32, 16, 16)
                 DBlock(in_channels, 32, 5, stride=2, padding=2),
@@ -146,10 +147,10 @@ class Discriminator(nn.Module):
                 # (64, 4, 4) -> (96, 2, 2)
                 DBlock(64, 96, 3, stride=2, padding=1),
             ])
-        elif self.form == 'jpeg_blocks':
+        elif self.form == 'jpeg':
             self.__sequential.extend([
                 # (64, 4, 4) -> (96, 2, 2)
-                DBlock(in_channels, 96, 3, stride=2, padding=1),
+                DBlock(in_channels, 96, 3, stride=2, padding=1, bias=True),
             ])
         self.__sequential.extend([
             # (96, 2, 2) -> (128, 1, 1)
@@ -165,7 +166,7 @@ class Discriminator(nn.Module):
             self.sn_embedding = None
 
     def forward(
-        self, inputs, labels=None, form: str = 'rgb_pixels'
+        self, inputs, labels=None
     ):
         h = self.main(inputs)
         # cGANs with Projection Discriminator

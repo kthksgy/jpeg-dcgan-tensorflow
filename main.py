@@ -1,120 +1,184 @@
-from argparse import ArgumentParser
+# 標準モジュール
+import argparse
 import csv
 from datetime import datetime
 from importlib import import_module
+from logging import (
+    getLogger, basicConfig,
+    DEBUG, INFO, WARNING
+)
 from pathlib import Path
 import random
+import sys
 from time import perf_counter
-from tqdm import tqdm
 
+# 追加モジュール
 import cv2
 import matplotlib
 import matplotlib.pyplot as plt
 import matplotlib.ticker as ticker
 import numpy as np
-
 import torch
 import torch.nn.parallel
 import torch.optim as optim
 import torch.utils.data
-import torchvision.datasets as dset
 import torchvision.transforms as transforms
+from tqdm import tqdm
 
+# 自作モジュール
 from util.image.shape import tile_images
-from util.jpeg.transform import (BlockwiseDCT, Quantize, LowPassFilter)
-from util.jpeg.jpegfile import inspect
-from util.jpeg.scanning import zigzag
-
+from utils.common.datasets import load_dataset
+from utils.device import AutoDevice
+from utils.transforms.common import Normalize
+from utils.transforms.jpeg import (
+    BlockwiseDCT,
+    JPEGQuantize,
+    LowPassFilter,
+)
 from models.mymodel32 import Generator, Discriminator
-from evaluation_index.frechet_inception_distance\
+from evaluation_index.frechet_inception_distance \
     import FrechetInceptionDistance
 
-LAUNCH_DATETIME = datetime.now()
-
-ARGUMENT_PARSER = ArgumentParser()
+# コマンドライン引数を取得するパーサー
+parser = argparse.ArgumentParser(
+    prog='PyTorch Generative Adversarial Network',
+    description='PyTorchを用いてGANの画像生成を行います。'
+)
 
 # 訓練に関する引数
-ARGUMENT_PARSER.add_argument(
+parser.add_argument(
     '-b', '--batch-size', help='バッチサイズを指定します。',
     type=int, default=250, metavar='B'
 )
-ARGUMENT_PARSER.add_argument(
+parser.add_argument(
     '-e', '--epochs', help='学習エポック数を指定します。',
     type=int, default=100, metavar='E'
 )
-ARGUMENT_PARSER.add_argument(
+parser.add_argument(
     '--dataset', help='データセットを指定します。',
     type=str, default='mnist', choices=['mnist', 'fashion_mnist', 'cifar10']
 )
-ARGUMENT_PARSER.add_argument(
-    '--data_path', help='データセットのパスを指定します。',
+parser.add_argument(
+    '--data-path', help='データセットのパスを指定します。',
     type=str, default='./data'
 )
-ARGUMENT_PARSER.add_argument(
+parser.add_argument(
     '--form', help='データをどのような形状で読み込むかを指定します。',
-    type=str, default='rgb_pixels', choices=['rgb_pixels', 'jpeg_blocks']
+    type=str, default='grayscale', choices=['grayscale', 'jpeg']
 )
-ARGUMENT_PARSER.add_argument(
-    '--low-pass-ratio', help='Low Passフィルターの割合を設定します。1.0でフィルターしません。',
-    type=float, default=1.0
-)
-ARGUMENT_PARSER.add_argument(
+parser.add_argument(
     '--criterion', help='訓練時に使用する損失関数を指定します。',
     type=str, default='binary_cross_entropy',
     choices=['binary_cross_entropy', 'hinge']
 )
-# 画像生成に関する引数
-ARGUMENT_PARSER.add_argument(
+parser.add_argument(
     '-z', '--z-dim', help='潜在空間のサイズを指定します。',
     type=int, default=128, metavar='Z'
 )
-# 結果に関する引数
-ARGUMENT_PARSER.add_argument(
+parser.add_argument(
+    '--seed', help='乱数生成器のシード値を指定します。',
+    type=int, default=42
+)
+# JPEG圧縮に関するコマンドライン引数
+parser.add_argument(
+    '--low-pass-ratio', help='Low Passフィルターの割合を設定します。1.0でフィルターしません。',
+    type=float, default=1.0, metavar='[0.0-1.0]'
+)
+parser.add_argument(
+    '--jpeg-quality', help='JPEG圧縮のQualityパラメータを指定します。量子化テーブルが変化します。',
+    type=int, default=90, metavar='[1-100]'
+)
+parser.add_argument(
+    '--quantization-table-source', help='JPEG圧縮の量子化テーブルのソースを指定します。',
+    type=str, default='jpeg_standard', choices=['jpeg_standard']
+)
+# 出力に関するコマンドライン引数
+parser.add_argument(
+    '--dir-name', help='出力ディレクトリの名前を指定します。',
+    type=str, default=None,
+)
+#   画像生成
+parser.add_argument(
     '--plot', help='Matplotlibでサンプルを表示します。',
     action='store_true'
 )
-ARGUMENT_PARSER.add_argument(
+parser.add_argument(
     '--no-sample', help='結果を評価するためのサンプルを出力しません。',
     action='store_true'
 )
-ARGUMENT_PARSER.add_argument(
+parser.add_argument(
     '--num-samples', help='結果を見るための1クラス当たりのサンプル数を指定します。',
     type=int, default=10
 )
-ARGUMENT_PARSER.add_argument(
-    '--sample-frequency', help='サンプルを出力する頻度をエポック数で指定します。',
-    type=int, default=10
+parser.add_argument(
+    '--sample-interval', help='生成画像の保存間隔をエポック数で指定します。',
+    type=int, default=5,
 )
-ARGUMENT_PARSER.add_argument(
-    '--no-save', help='生成器と識別器の学習状況を保存しません。',
+#   モデルの保存
+parser.add_argument(
+    '--save', help='訓練したモデルを保存します。',
     action='store_true'
 )
-ARGUMENT_PARSER.add_argument(
-    '--save-frequency', help='モデルの保存頻度をエポック数で指定します。',
-    type=int, default=100,
+parser.add_argument(
+    '--save-interval', help='モデルの保存間隔をエポック数で指定します。',
+    type=int, default=10,
 )
-ARGUMENT_PARSER.add_argument(
+parser.add_argument(
+    '--load', help='訓練したモデルのパスをGenerator、Discriminatorの順に指定します。',
+    type=str, nargs=2, default=None
+)
+parser.add_argument(
     '--test', help='生成時間のテストを行います。',
     action='store_true'
 )
 # FIDに関する設定
-ARGUMENT_PARSER.add_argument(
-    '--fid', help='FIDでGeneratorを評価します。',
+parser.add_argument(
+    '--fid', help='GeneratorをFIDで評価します。',
     action='store_true'
 )
-ARGUMENT_PARSER.add_argument(
+parser.add_argument(
     '--fid-batch-size', help='Inception-V3に与えるデータのバッチサイズを指定します。',
     type=int, default=100
 )
-ARGUMENT_PARSER.add_argument(
+parser.add_argument(
     '--fid-num-samples', help='FIDで検証するサンプル数を2048以上で指定します。',
     type=int, default=10000
 )
-ARGUMENT_PARSER.add_argument(
-    '--fid-frequency', help='FIDを計算する頻度を指定します。',
-    type=int, default=10,
+parser.add_argument(
+    '--fid-interval', help='FIDを計算する間隔を指定します。',
+    type=int, default=5,
 )
-ARGS = ARGUMENT_PARSER.parse_args()
+# PyTorchに関するコマンドライン引数
+parser.add_argument(
+    '--preload', help='事前に訓練データをメモリに読み込みます。',
+    action='store_true'
+)
+parser.add_argument(
+    '--disable-cuda', '--cpu', help='CUDAを無効化しGPU上では計算を行わず全てCPU上で計算します。',
+    action='store_true'
+)
+parser.add_argument(
+    '--info', help='ログ表示レベルをINFOに設定し、詳細なログを表示します。',
+    action='store_true'
+)
+parser.add_argument(
+    '--debug', help='ログ表示レベルをDEBUGに設定し、より詳細なログを表示します。',
+    action='store_true'
+)
+# コマンドライン引数をパースする
+args = parser.parse_args()
+
+# 結果を出力するために起動日時を保持する
+LAUNCH_DATETIME = datetime.now()
+
+# ロギングの設定
+basicConfig(
+    format='%(asctime)s %(name)s %(funcName)s %(levelname)s: %(message)s',
+    datefmt='%Y/%m/%d %H:%M:%S',
+    level=DEBUG if args.debug else INFO if args.info else WARNING,
+)
+# 名前を指定してロガーを取得する
+logger = getLogger('main')
 
 # Matplotlibの設定
 pfp = \
@@ -123,258 +187,181 @@ pfp = \
     .FontProperties(fname='./fonts/KintoSans-Bold.ttf')
 PFP = {'fontproperties': pfp}
 matplotlib.rcParams['savefig.dpi'] = 350
+logger.info('Matplotlibの設定を行いました。')
 
 # 出力に関する定数
-OUTPUT_DIR = Path(
-    LAUNCH_DATETIME.strftime(
-        f'./outputs/{ARGS.dataset}/{ARGS.form}/%Y%m%d%H%M%S'))
-if not ARGS.no_sample:
+if args.dir_name is None:
+    OUTPUT_DIR = Path(
+        LAUNCH_DATETIME.strftime(
+            f'./outputs/{args.dataset}/{args.form}/%Y%m%d%H%M%S'))
+else:
+    OUTPUT_DIR = Path(f'./outputs/{args.dataset}/{args.form}/{args.dir_name}')
+OUTPUT_DIR.mkdir(parents=True)
+logger.info(f'結果出力用のディレクトリ({OUTPUT_DIR})を作成しました。')
+f_outputs = open(
+    OUTPUT_DIR.joinpath('outputs.txt'), mode='w', encoding='utf-8')
+f_outputs.write(' '.join(sys.argv) + '\n')
+if not args.no_sample:
     OUTPUT_SAMPLE_DIR = OUTPUT_DIR.joinpath('samples')
     OUTPUT_SAMPLE_DIR.mkdir(parents=True)
-if not ARGS.no_save:
+    logger.info(f'画像用のディレクトリ({OUTPUT_SAMPLE_DIR})を作成しました。')
+if args.save:
     OUTPUT_MODEL_DIR = OUTPUT_DIR.joinpath('models')
     OUTPUT_MODEL_DIR.mkdir(parents=True)
+    logger.info(f'モデル用のディレクトリ({OUTPUT_MODEL_DIR})を作成しました。')
 
-# 乱数のシード値の設定
-SEED = 0
-random.seed(SEED)
-np.random.seed(SEED)
-torch.manual_seed(SEED)
+# 乱数生成器のシード値の設定
+random.seed(args.seed)
+np.random.seed(args.seed)
+torch.manual_seed(args.seed)
+torch.backends.cudnn.deterministic = True
+torch.backends.cudnn.benchmark = False
+logger.info('乱数生成器のシード値を設定しました。')
 
+# デバイスについての補助クラスをインスタンス化
+auto_device = AutoDevice(disable_cuda=args.disable_cuda)
+logger.info('デバイスの優先順位を計算しました。')
+device = auto_device()
+logger.info(f'メインデバイスとして〈{device}〉が選択されました。')
 
-class AutoDevice:
-    def __init__(self):
-        if torch.cuda.is_available():
-            self.cuda_devices = []
-            for i in range(torch.cuda.device_count()):
-                prop = torch.cuda.get_device_properties(f'cuda:{i}')
-                self.cuda_devices.append({
-                    'id': f'cuda:{i}',
-                    'name': prop.name,
-                    'capability': (prop.major, prop.minor),
-                    'memory': prop.total_memory,
-                    'num_processors': prop.multi_processor_count,
-                })
-            self.cuda_devices.sort(key=lambda d: d['memory'], reverse=True)
-        else:
-            self.cuda_devices = None
-
-    def __call__(self, id):
-        if self.cuda_devices is not None and id >= 0:
-            return self.cuda_devices[min(id, len(self.cuda_devices) - 1)]['id']
-        else:
-            return 'cpu'
-
-
-auto_device = AutoDevice()
-
-
-class Normalize(transforms.Normalize):
-    def inverse(self, tensor):
-        """
-        Args:
-            tensor (Tensor): Tensor image of size (C, H, W) to be denormalized.
-        Returns:
-            Tensor: Denormalized image.
-        """
-        for t, m, s in zip(tensor, self.mean, self.std):
-            # 正規化: t.sub_(m).div_(s)
-            t.mul_(s).add_(m)
-        return tensor
-
-
-MEAN_GRAYSCALE = (0.5,)
-STD_GRAYSCALE = (0.5,)
-
+logger.info('画像に適用する変換のリストを定義します。')
 dataset_transforms = []
 
-if ARGS.dataset == 'mnist' or ARGS.dataset == 'fashion_mnist':
+if args.dataset in ['mnist', 'fashion_mnist']:
     dataset_transforms.append(
         transforms.Pad(2, fill=0, padding_mode='constant'))
+    logger.info('変換リストにゼロパディングを追加しました。')
 else:
     dataset_transforms.append(transforms.Grayscale())
+    logger.info('変換リストにグレイスケール化を追加しました。')
 
+IMAGE_SIZE = (32, 32)
+
+# Grayscale Transform Instances
+MEAN_GRAYSCALE = (0.5,)
+STD_GRAYSCALE = (0.5,)
+normalize = Normalize(MEAN_GRAYSCALE, STD_GRAYSCALE, inplace=True)
+logger.info('グレイスケール用の正規化を定義しました。')
+
+# JPEG Transform Instances
 bwdct = BlockwiseDCT((32, 32))
+logger.info('ブロックワイズ離散コサイン変換を定義しました。')
+jpeg_quantize = JPEGQuantize(
+    quality=args.jpeg_quality, source=args.quantization_table_source,
+    luma_region=[(0, i) for i in IMAGE_SIZE])
+logger.info('JPEG量子化を定義しました。')
+low_pass_filter = LowPassFilter(args.low_pass_ratio)
+logger.info('ローパスフィルタを定義しました。')
 
-quantization_table = zigzag(
-    inspect('./assets/q90_420.jpg')['quantization_table0'], inverse=True)
-quantize = Quantize(quantization_table)
-
-bw_lpf = LowPassFilter(ARGS.low_pass_ratio)
-
-if ARGS.form == 'rgb_pixels':
-    NUM_FEATURES = 1
-elif ARGS.form == 'jpeg_blocks':
-    NUM_FEATURES = bw_lpf.new_num_coefficients
-
-
-if ARGS.form == 'jpeg_blocks':
+if args.form == 'jpeg':
     dataset_transforms.extend([
         bwdct,
-        quantize,
-        bw_lpf
+        jpeg_quantize,
+        low_pass_filter
     ])
+    logger.info('変換リストにJPEG圧縮処理を追加しました。')
 
 to_tensor = transforms.ToTensor()
 dataset_transforms.append(to_tensor)
+logger.info('変換リストにテンソル化を追加しました。')
 
-norm_funcs = {}
+if args.form == 'grayscale':
+    dataset_transforms.append(normalize)
+    logger.info('変換リストに正規化を追加しました。')
 
-if ARGS.form == 'rgb_pixels':
-    norm_funcs['rgb_pixels'] = Normalize(MEAN_GRAYSCALE, STD_GRAYSCALE)
-    dataset_transforms.append(norm_funcs['rgb_pixels'])
-
-
-def load_dataset(dataset_name: str, transform=None):
-    if isinstance(transform, (list, tuple)):
-        transform = transforms.Compose(transform)
-    if dataset_name == 'mnist':
-        num_classes = 10
-        dataset = dset.MNIST(
-            root=ARGS.data_path, download=True, train=True,
-            transform=transform)
-    elif dataset_name == 'fashion_mnist':
-        num_classes = 10
-        dataset = dset.FashionMNIST(
-            root=ARGS.data_path, download=True, train=True,
-            transform=transform)
-    return dataset, num_classes
-
-
-dataset, NUM_CLASSES = load_dataset(ARGS.dataset, dataset_transforms)
+dataset = load_dataset(
+    args.dataset, root=args.data_path, transform=dataset_transforms)
+NUM_CLASSES = len(dataset.classes)
+NUM_FEATURES = dataset[0][0].shape[0]
+logger.info(f'データセット〈{args.dataset}〉を読み込みました。')
 
 dataloader = torch.utils.data.DataLoader(
-    dataset, batch_size=ARGS.batch_size, shuffle=True)
+    dataset, batch_size=args.batch_size, shuffle=True)
+logger.info('データローダを生成しました。')
 
-if ARGS.form == 'jpeg_blocks':
+if args.preload:
     images_preloaded = []
     labels_preloaded = []
     for images, labels in tqdm(
         dataloader,
-        desc='DCT係数の事前読み込み中... ',
+        desc='学習データの事前読み込み中...',
         total=len(dataloader),
         leave=False
     ):
         images_preloaded.append(images)
         labels_preloaded.append(labels)
     images_preloaded = torch.cat(images_preloaded)
-    # STD_JPEG_BLOCKS, MEAN_JPEG_BLOCKS = \
-    #     torch.std_mean(
-    #         images_preloaded.permute(0, 2, 3, 1).reshape(-1, 64), dim=0)
-    # norm_funcs['jpeg_blocks'] = (
-    #     transforms.Normalize(MEAN_JPEG_BLOCKS, STD_JPEG_BLOCKS),
-    #     Denormalize(MEAN_JPEG_BLOCKS, STD_JPEG_BLOCKS))
-    # for image in images_preloaded:
-    #     norm_funcs['jpeg_blocks'](image)
     labels_preloaded = torch.cat(labels_preloaded)
     dataset = torch.utils.data.TensorDataset(
         images_preloaded, labels_preloaded)
     dataloader = torch.utils.data.DataLoader(
-        dataset, batch_size=ARGS.batch_size, shuffle=True)
+        dataset, batch_size=args.batch_size, shuffle=True)
 
-INCEPTION_V3_PATH = Path(ARGS.data_path).joinpath('inception_v3')
-fid = FrechetInceptionDistance(device=auto_device(1))
-if ARGS.fid:
-    NPZ_PATH = INCEPTION_V3_PATH\
-        .joinpath(ARGS.dataset).joinpath(f'{ARGS.dataset}.npz')
+INCEPTION_V3_PATH = Path(args.data_path).joinpath('inception_v3')
+fid = FrechetInceptionDistance(device=device)
+if args.fid:
+    NPZ_PATH = Path(args.data_path) \
+        .joinpath('inception_v3') \
+        .joinpath(args.dataset) \
+        .joinpath(f'{args.dataset}_{IMAGE_SIZE[0]}_{IMAGE_SIZE[1]}.npz')
     NPZ_PATH.parent.mkdir(parents=True, exist_ok=True)
     if NPZ_PATH.exists():
         npz = np.load(NPZ_PATH)
         fid_real_features = npz['features']
         fid_labels = npz['labels']
     else:
-        fid_dataset_transforms = [
-            e for e in dataset_transforms
-            if not isinstance(e, (BlockwiseDCT, Normalize))]
-        fid_dataset, _ = load_dataset(ARGS.dataset, fid_dataset_transforms)
-        fid_dataloader = torch.utils.data.DataLoader(
-            fid_dataset, batch_size=ARGS.fid_batch_size, drop_last=True)
-        pbar = tqdm(
-            fid_dataloader,
-            desc='[準備] Inception-V3を適用中... ',
-            total=len(fid_dataloader),
-            leave=False)
-        tmp = [[] for _ in range(NUM_CLASSES)]
-        with torch.no_grad():
-            for imgs, lbls in pbar:
-
-                feats = fid.get_features(imgs)
-                for feat, lbl in zip(feats, lbls):
-                    tmp[lbl].append(feat)
-                filled = 0
-                for arr in tmp:
-                    if len(arr) >= 1000:
-                        filled += 1
-                if filled >= len(tmp):
-                    break
-        fid_real_features = np.concatenate([
-            np.stack(arr[:1000]) for arr in tmp])
-        fid_labels = np.repeat(np.arange(0, 10), 1000)
-        np.savez_compressed(
-            NPZ_PATH, features=fid_real_features, labels=fid_labels)
-        pbar.close()
-    fid_num_batches = int(np.ceil(fid_labels.shape[0] / ARGS.fid_batch_size))
+        raise Exception('指定したデータセットのInception V3の特徴ファイルが見つかりません。')
+    fid_num_batches = int(np.ceil(fid_labels.shape[0] / args.fid_batch_size))
     fid_labels_batch = np.pad(
         fid_labels,
-        [0, fid_num_batches * ARGS.fid_batch_size - fid_labels.shape[0]])\
-        .reshape(fid_num_batches, ARGS.fid_batch_size).astype(np.int64)
+        [0, fid_num_batches * args.fid_batch_size - fid_labels.shape[0]])\
+        .reshape(fid_num_batches, args.fid_batch_size).astype(np.int64)
 
-if ARGS.fid_num_samples < 2048:
-    ARGS.fid_num_samples = 2048
+if args.fid_num_samples < 2048:
+    args.fid_num_samples = 2048
 
 model_g = Generator(
-    ARGS.z_dim, NUM_FEATURES,
-    bias=True, num_classes=NUM_CLASSES, form=ARGS.form).to(auto_device(0))
+    args.z_dim, NUM_FEATURES,
+    bias=True, num_classes=NUM_CLASSES, form=args.form).to(device)
 model_d = Discriminator(
-    NUM_FEATURES, num_classes=NUM_CLASSES, form=ARGS.form).to(auto_device(0))
-# summary(model_g, (ARGS.z_dim,))
-# summary(model_d, (1, 32, 32))
+    NUM_FEATURES, num_classes=NUM_CLASSES, form=args.form).to(device)
 
 ##################
 # Optimizerの設定 #
 ##################
-if ARGS.form == 'rgb_pixels':
-    optim_g = optim.Adam(
-        model_g.parameters(),
-        lr=0.0016 * ARGS.batch_size / 1000,
-        betas=[0.5, 0.999])
-    optim_d = optim.Adam(
-        model_d.parameters(),
-        lr=0.0004 * ARGS.batch_size / 1000,
-        betas=[0.5, 0.999])
-elif ARGS.form == 'jpeg_blocks':
-    optim_g = optim.Adam(
-        model_g.parameters(),
-        lr=0.002 * ARGS.batch_size / 1000,
-        betas=[0.5, 0.999])
-    optim_d = optim.Adam(
-        model_d.parameters(),
-        lr=0.00025 * ARGS.batch_size / 1000,
-        betas=[0.5, 0.999])
+optim_g = optim.Adam(
+    model_g.parameters(),
+    lr=0.001 * args.batch_size / 1000,
+    betas=[0.5, 0.999])
+optim_d = optim.Adam(
+    model_d.parameters(),
+    lr=0.00025 * args.batch_size / 1000,
+    betas=[0.5, 0.999])
 
 example_labels = \
-    torch.arange(start=0, end=NUM_CLASSES, step=1, device=auto_device(0))\
-    .view(-1, 1).repeat(1, ARGS.num_samples).flatten()
+    torch.arange(start=0, end=NUM_CLASSES, step=1, device=device)\
+    .view(-1, 1).repeat(1, args.num_samples).flatten()
 example_z = torch.randn(
-    example_labels.size()[0], ARGS.z_dim, device=auto_device(0))
+    example_labels.size()[0], args.z_dim, device=device)
 
-criterion_module = import_module(f'criterions.{ARGS.criterion}')
+# 損失関数の定義を動的インポートする
+criterion_module = import_module(f'criterions.{args.criterion}')
+criterion = criterion_module.Criterion(args.batch_size, device)
 
-criterion = criterion_module.Criterion(ARGS.batch_size, auto_device(0))
 
-
-def to_images(tensors, form: str = 'rgb_pixels', norm_funcs=None):
-    if form in norm_funcs:
-        normalize = norm_funcs[form]
-        for tensor in tensors:
-            normalize.inverse(tensor)
-    if form == 'rgb_pixels':
+def to_images(tensors, form: str = 'grayscale'):
+    if form == 'grayscale':
+        map(normalize.inverse, tensors)
         images = tensors.permute(0, 2, 3, 1).numpy()
-    elif form == 'jpeg_blocks':
+    elif form == 'jpeg':
         coefs = tensors.permute(0, 2, 3, 1).numpy()
         images = np.zeros((coefs.shape[0], 32, 32, 1))
         for i, coef in enumerate(coefs):
-            images[i] = np.expand_dims(bwdct.inverse(bw_lpf.inverse(coef)), -1)
+            coef = low_pass_filter.inverse(coef)
+            # coef = np.round(coef)
+            coef = jpeg_quantize.inverse(coef)
+            coef = bwdct.inverse(coef)
+            images[i] = np.expand_dims(coef, -1)
             images[i] /= images[i].max()
     images *= 255
     return images.clip(0, 255).astype(np.uint8)
@@ -383,21 +370,16 @@ def to_images(tensors, form: str = 'rgb_pixels', norm_funcs=None):
 f_results = open(
     OUTPUT_DIR.joinpath('results.csv'), mode='w', encoding='utf-8')
 csv_writer = csv.writer(f_results, lineterminator='\n')
-csv_writer.writerow([
+result_items = [
     'Epoch', 'Generator Loss Mean', 'Discriminator Loss Mean',
-    'Epoch Duration', 'FID', 'Sample Image File',
-    'Generator Model File', 'Discriminator Model File',
-])
-f_results.flush()
-
-csv_idx = {
-    'Epoch': 0, 'Generator Loss Mean': 1, 'Discriminator Loss Mean': 2,
-    'Epoch Duration': 3, 'FID': 4, 'Sample Image File': 5,
-    'Generator Model File': 6, 'Discriminator Model File': 7,
-}
+    'Train Elapsed Time', 'FID', 'Sample Image File',
+    'Generator Model File', 'Discriminator Model File'
+]
+csv_writer.writerow(result_items)
+csv_idx = {item: i for i, item in enumerate(result_items)}
 
 fig, ax = plt.subplots(1, 1)
-for epoch in range(ARGS.epochs):
+for epoch in range(args.epochs):
     results = ['' for _ in range(len(csv_idx))]
     results[csv_idx['Epoch']] = f'{epoch + 1}'
 
@@ -405,13 +387,15 @@ for epoch in range(ARGS.epochs):
 
     pbar = tqdm(
         enumerate(dataloader),
-        desc=f'[{epoch+1}/{ARGS.epochs}] 訓練開始',
-        total=len(dataset)//ARGS.batch_size,
+        desc=f'[{epoch+1}/{args.epochs}] 訓練開始',
+        total=len(dataset)//args.batch_size,
         leave=False)
+    model_g.train()
+    model_d.train()
     begin_time = perf_counter()  # 時間計測開始
     for i, (real_images, labels) in pbar:
-        real_images = real_images.to(auto_device(0))
-        labels = labels.to(auto_device(0))
+        real_images = real_images.to(device)
+        labels = labels.to(device)
 
         #######################################################################
         # Discriminatorの訓練
@@ -421,11 +405,11 @@ for epoch in range(ARGS.epochs):
         loss_d_real = criterion(output_d_real, real=True, generator=False)
         loss_d_real.backward()
 
-        z = torch.randn(ARGS.batch_size, ARGS.z_dim).to(auto_device(0))
+        z = torch.randn(args.batch_size, args.z_dim, device=device)
         fake_images = model_g(z, labels)
-        output_d_fake = model_d(fake_images, labels)
+        output_d_fake = model_d(fake_images.detach(), labels)
         loss_d_fake = criterion(output_d_fake, real=False, generator=False)
-        loss_d_fake.backward(retain_graph=True)  # 同じ勾配をGeneratorでも利用する
+        loss_d_fake.backward()  # 同じ勾配をGeneratorでも利用する
         loss_d = loss_d_real + loss_d_fake
         log_loss_d.append(loss_d.item())
         optim_d.step()
@@ -440,7 +424,7 @@ for epoch in range(ARGS.epochs):
         log_loss_g.append(loss_g.item())
         optim_g.step()
         pbar.set_description_str(
-            f'[{epoch+1}/{ARGS.epochs}] 訓練中... '
+            f'[{epoch+1}/{args.epochs}] 訓練中... '
             f'<損失: (G={loss_g.item():.016f}, D={loss_d.item():.016f})>')
     end_time = perf_counter()  # 時間計測終了
     pbar.close()
@@ -450,55 +434,58 @@ for epoch in range(ARGS.epochs):
     results[csv_idx['Generator Loss Mean']] = f'{loss_g_mean:.016f}'
     results[csv_idx['Discriminator Loss Mean']] = f'{loss_d_mean:.016f}'
 
-    epoch_duration = end_time - begin_time
-    results[csv_idx['Epoch Duration']] = f'{epoch_duration:.07f}'
+    train_elapsed_time = end_time - begin_time
+    results[csv_idx['Train Elapsed Time']] = f'{train_elapsed_time:.07f}'
 
     print(
-        f'[{epoch+1}/{ARGS.epochs}] 訓練完了. '
-        f'<エポック処理時間: {epoch_duration:.07f}[s/epoch]'
+        f'[{epoch+1}/{args.epochs}] 訓練完了. '
+        f'<エポック処理時間: {train_elapsed_time:.07f}[s/epoch]'
         f', 平均損失: (G={loss_g_mean:.016f}, D={loss_d_mean:.016f})>')
 
+    model_g.eval()
+    model_d.eval()
+
     # FID
-    if ARGS.fid and (
+    if args.fid and (
             epoch == 0
-            or (epoch + 1) % ARGS.fid_frequency == 0
-            or epoch == ARGS.epochs - 1):
+            or (epoch + 1) % args.fid_interval == 0
+            or epoch == args.epochs - 1):
         pbar = tqdm(
             fid_labels_batch,
-            desc=f'[{epoch+1}/{ARGS.epochs}] 画像を生成中... ',
+            desc=f'[{epoch+1}/{args.epochs}] 画像を生成中... ',
             total=fid_labels_batch.shape[0],
             leave=False)
         fid_fake_features = []
         with torch.no_grad():
             for labels in pbar:
                 z = torch.randn(
-                    ARGS.fid_batch_size, ARGS.z_dim, device=auto_device(0))
+                    args.fid_batch_size, args.z_dim, device=device)
                 fake_images = to_images(
-                    model_g(z, torch.from_numpy(labels).to(auto_device(0)))
+                    model_g(z, torch.from_numpy(labels).to(device))
                     .detach().cpu(),
-                    form=ARGS.form, norm_funcs=norm_funcs)
+                    form=args.form)
                 fake_images = torch.stack([
                     to_tensor(image) for image in fake_images])
                 fid_fake_features.append(fid.get_features(fake_images))
         fid_fake_features = np.concatenate(fid_fake_features)
-        pbar.set_description_str(f'[{epoch+1}/{ARGS.epochs}] FID計算中... ')
+        pbar.set_description_str(f'[{epoch+1}/{args.epochs}] FID計算中... ')
         fid_score = fid(fid_real_features, fid_fake_features)
         pbar.close()
         results[csv_idx['FID']] = f'{fid_score:.05f}'
-        print(f'[{epoch+1}/{ARGS.epochs}] FID計算完了. <FID: {fid_score:.05f}>')
+        print(f'[{epoch+1}/{args.epochs}] FID計算完了. <FID: {fid_score:.05f}>')
 
-    if not ARGS.no_sample and (
+    if not args.no_sample and (
             epoch == 0
-            or (epoch + 1) % ARGS.sample_frequency == 0
-            or epoch == ARGS.epochs - 1):
+            or (epoch + 1) % args.sample_interval == 0
+            or epoch == args.epochs - 1):
         with torch.no_grad():
             example_images = model_g(example_z, example_labels).detach().cpu()
         example_images = to_images(
-            example_images, form=ARGS.form, norm_funcs=norm_funcs)
+            example_images, form=args.form)
         image_shape = example_images.shape[1:]
 
         example_images_tiled = tile_images(example_images, 10, 10)
-        if ARGS.plot:
+        if args.plot:
             title_text = f'生成画像 ({epoch+1}エポック完了)'
             fig.canvas.set_window_title(title_text)
             fig.suptitle(title_text, **PFP)
@@ -514,9 +501,9 @@ for epoch in range(ARGS.epochs):
             example_images_tiled)
         results[csv_idx['Sample Image File']] = sample_image_fname
 
-    if not ARGS.no_save and (
-            (epoch + 1) % ARGS.save_frequency == 0
-            or epoch == ARGS.epochs - 1):
+    if args.save and (
+            (epoch + 1) % args.save_interval == 0
+            or epoch == args.epochs - 1):
         model_g_fname = f'generator_{epoch+1:06d}.pt'
         # TODO: Generatorのセーブを行う。
         results[csv_idx['Generator Model File']] = model_g_fname
@@ -528,28 +515,23 @@ for epoch in range(ARGS.epochs):
     f_results.flush()
 f_results.close()
 
-f_measurements = open(
-    OUTPUT_DIR.joinpath('measurements.txt'), mode='w', encoding='utf-8')
-
-if ARGS.test:
+if args.test:
     print('生成時間の計測を開始します。')
     with torch.no_grad():
         z = torch.zeros(
-            ARGS.batch_size, ARGS.z_dim,
-            device=auto_device(0), dtype=torch.float)
+            args.batch_size, args.z_dim,
+            device=device, dtype=torch.float)
         labels = torch.zeros(
-            ARGS.batch_size, device=auto_device(0), dtype=torch.long)
+            args.batch_size, device=device, dtype=torch.long)
         begin_time = perf_counter()
-        for _ in range(1000):
-            torch.randn(ARGS.batch_size, ARGS.z_dim, out=z)
-            torch.randint(0, NUM_CLASSES, (ARGS.batch_size,), out=labels)
-            # model_g(z, labels)
-            to_images(
-                model_g(z, labels).detach().cpu(),
-                form=ARGS.form, norm_funcs=norm_funcs)
+        for _ in range(10):
+            for _ in range(1000):
+                torch.randn(args.batch_size, args.z_dim, out=z)
+                torch.randint(0, NUM_CLASSES, (args.batch_size,), out=labels)
+                model_g(z, labels)
         end_time = perf_counter()
-    tmpstr = f'生成時間(1バッチ{ARGS.batch_size}枚×{1000}回): '\
-        f'{end_time - begin_time:.07f}[s]'
+    tmpstr = f'生成時間(1バッチ{args.batch_size}枚×{1000}回): '\
+        f'{(end_time - begin_time) / 10:.07f}[s]'
     print(tmpstr)
-    f_measurements.write(tmpstr)
-f_measurements.close()
+    f_outputs.write(tmpstr)
+f_outputs.close()

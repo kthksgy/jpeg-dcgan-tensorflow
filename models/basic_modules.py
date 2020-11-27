@@ -12,7 +12,7 @@ def init_conv(conv, glu=True):
 
 
 class SelfAttention(nn.Module):
-    """ Self attention Layer"""
+    """Self attention Layer"""
     def __init__(self, in_dim):
         super(SelfAttention, self).__init__()
         self.chanel_in = in_dim
